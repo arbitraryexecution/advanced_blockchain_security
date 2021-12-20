@@ -38,7 +38,6 @@ contract Roulette {
         bet.number = number;
         bet.amount = amount;
 
-        // Winning Bet will be Black 26
         if (compareStrings(colorString, "Red")) {
             bet.color = Color.RED;
         }
