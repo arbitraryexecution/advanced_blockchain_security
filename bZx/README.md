@@ -1,15 +1,8 @@
-# Basic Sample Hardhat Project
+### bZx exploit lab
 
-This project demonstrates a basic Hardhat use case. It comes with a sample contract, a test for that contract, a sample script that deploys that contract, and an example of a task implementation, which simply lists the available accounts.
+## thing
 
-Try running some of the following tasks:
-
-```shell
-npx hardhat accounts
-npx hardhat compile
-npx hardhat clean
-npx hardhat test
-npx hardhat node
-node scripts/sample-script.js
-npx hardhat help
-```
+1. `npm i`
+2. put your private alchemy api key in the .env file
+3. fill in exploit @ //TODO
+4. test with npm exploit

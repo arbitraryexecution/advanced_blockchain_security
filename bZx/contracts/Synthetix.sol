@@ -3,7 +3,7 @@
 */
 
 /*
-* Synthetix - Synth.sol
+* Synthetix - Synthetix.sol
 *
 * https://github.com/Synthetixio/synthetix
 * https://synthetix.io
@@ -1133,20 +1133,36 @@ contract ExternStateToken is SelfDestructible, Proxyable {
 }
 
 
-/**
- * @title FeePool Interface
- * @notice Abstract contract to hold public getters
- */
-contract IFeePool {
-    address public FEE_ADDRESS;
-    uint public exchangeFeeRate;
-    function amountReceivedFromExchange(uint value) external view returns (uint);
-    function amountReceivedFromTransfer(uint value) external view returns (uint);
-    function recordFeePaid(uint xdrAmount) external;
-    function appendAccountIssuanceRecord(address account, uint lockedAmount, uint debtEntryIndex) external;
-    function setRewardsToDistribute(uint amount) external;
-}
+library Math {
 
+    using SafeMath for uint;
+    using SafeDecimalMath for uint;
+
+    /**
+    * @dev Uses "exponentiation by squaring" algorithm where cost is 0(logN)
+    * vs 0(N) for naive repeated multiplication. 
+    * Calculates x^n with x as fixed-point and n as regular unsigned int.
+    * Calculates to 18 digits of precision with SafeDecimalMath.unit()
+    */
+    function powDecimal(uint x, uint n)
+        internal
+        pure
+        returns (uint)
+    {
+        // https://mpark.github.io/programming/2014/08/18/exponentiation-by-squaring/
+
+        uint result = SafeDecimalMath.unit();
+        while (n > 0) {
+            if (n % 2 != 0) {
+                result = result.multiplyDecimal(x);
+            }
+            x = x.multiplyDecimal(x);
+            n /= 2;
+        }
+        return result;
+    }
+}
+    
 
 /**
  * @title SynthetixState interface contract
@@ -1200,6 +1216,21 @@ interface ISynthetixEscrow {
 
 
 /**
+ * @title FeePool Interface
+ * @notice Abstract contract to hold public getters
+ */
+contract IFeePool {
+    address public FEE_ADDRESS;
+    uint public exchangeFeeRate;
+    function amountReceivedFromExchange(uint value) external view returns (uint);
+    function amountReceivedFromTransfer(uint value) external view returns (uint);
+    function recordFeePaid(uint xdrAmount) external;
+    function appendAccountIssuanceRecord(address account, uint lockedAmount, uint debtEntryIndex) external;
+    function setRewardsToDistribute(uint amount) external;
+}
+
+
+/**
  * @title ExchangeRates interface
  */
 interface IExchangeRates {
@@ -1210,53 +1241,6 @@ interface IExchangeRates {
 
     function rateIsStale(bytes32 currencyKey) external view returns (bool);
     function anyRateIsStale(bytes32[] currencyKeys) external view returns (bool);
-}
-
-
-/**
- * @title Synthetix interface contract
- * @notice Abstract contract to hold public getters
- * @dev pseudo interface, actually declared as contract to hold the public getters 
- */
-
-
-contract ISynthetix {
-
-    // ========== PUBLIC STATE VARIABLES ==========
-
-    IFeePool public feePool;
-    ISynthetixEscrow public escrow;
-    ISynthetixEscrow public rewardEscrow;
-    ISynthetixState public synthetixState;
-    IExchangeRates public exchangeRates;
-
-    uint public totalSupply;
-        
-    mapping(bytes32 => Synth) public synths;
-
-    // ========== PUBLIC FUNCTIONS ==========
-
-    function balanceOf(address account) public view returns (uint);
-    function transfer(address to, uint value) public returns (bool);
-    function effectiveValue(bytes32 sourceCurrencyKey, uint sourceAmount, bytes32 destinationCurrencyKey) public view returns (uint);
-
-    function synthInitiatedExchange(
-        address from,
-        bytes32 sourceCurrencyKey,
-        uint sourceAmount,
-        bytes32 destinationCurrencyKey,
-        address destinationAddress) external returns (bool);
-    function exchange(
-        bytes32 sourceCurrencyKey,
-        uint sourceAmount,
-        bytes32 destinationCurrencyKey) external returns (bool);
-    function collateralisationRatio(address issuer) public view returns (uint);
-    function totalIssuedSynths(bytes32 currencyKey)
-        public
-        view
-        returns (uint);
-    function getSynth(bytes32 currencyKey) public view returns (ISynth);
-    function debtBalanceOf(address issuer, bytes32 currencyKey) public view returns (uint);
 }
 
 
@@ -1439,4 +1423,2166 @@ contract Synth is ExternStateToken {
     function emitBurned(address account, uint value) internal {
         proxy._emit(abi.encode(value), 2, BURNED_SIG, bytes32(account), 0, 0);
     }
+}
+
+
+/**
+ * @title Synthetix interface contract
+ * @notice Abstract contract to hold public getters
+ * @dev pseudo interface, actually declared as contract to hold the public getters 
+ */
+
+
+contract ISynthetix {
+
+    // ========== PUBLIC STATE VARIABLES ==========
+
+    IFeePool public feePool;
+    ISynthetixEscrow public escrow;
+    ISynthetixEscrow public rewardEscrow;
+    ISynthetixState public synthetixState;
+    IExchangeRates public exchangeRates;
+
+    uint public totalSupply;
+        
+    mapping(bytes32 => Synth) public synths;
+
+    // ========== PUBLIC FUNCTIONS ==========
+
+    function balanceOf(address account) public view returns (uint);
+    function transfer(address to, uint value) public returns (bool);
+    function effectiveValue(bytes32 sourceCurrencyKey, uint sourceAmount, bytes32 destinationCurrencyKey) public view returns (uint);
+
+    function synthInitiatedExchange(
+        address from,
+        bytes32 sourceCurrencyKey,
+        uint sourceAmount,
+        bytes32 destinationCurrencyKey,
+        address destinationAddress) external returns (bool);
+    function exchange(
+        bytes32 sourceCurrencyKey,
+        uint sourceAmount,
+        bytes32 destinationCurrencyKey) external returns (bool);
+    function collateralisationRatio(address issuer) public view returns (uint);
+    function totalIssuedSynths(bytes32 currencyKey)
+        public
+        view
+        returns (uint);
+    function getSynth(bytes32 currencyKey) public view returns (ISynth);
+    function debtBalanceOf(address issuer, bytes32 currencyKey) public view returns (uint);
+}
+
+
+/*
+-----------------------------------------------------------------
+MODULE DESCRIPTION
+-----------------------------------------------------------------
+
+The SNX supply schedule contract determines the amount of SNX tokens
+mintable over the course of 195 weeks.
+
+Exponential Decay Inflation Schedule
+
+Synthetix.mint() function is used to mint the inflationary supply.
+
+The mechanics for Inflation Smoothing and Terminal Inflation 
+have been defined in these sips
+https://sips.synthetix.io/sips/sip-23
+https://sips.synthetix.io/sips/sip-24
+
+The previous SNX Inflation Supply Schedule is at 
+https://etherscan.io/address/0xA3de830b5208851539De8e4FF158D635E8f36FCb#code
+
+-----------------------------------------------------------------
+*/
+
+
+/**
+ * @title SupplySchedule contract
+ */
+contract SupplySchedule is Owned {
+    using SafeMath for uint;
+    using SafeDecimalMath for uint;
+    using Math for uint;
+
+    // Time of the last inflation supply mint event
+    uint public lastMintEvent;
+
+    // Counter for number of weeks since the start of supply inflation
+    uint public weekCounter;
+
+    // The number of SNX rewarded to the caller of Synthetix.mint()
+    uint public minterReward = 200 * SafeDecimalMath.unit();
+
+    // The initial weekly inflationary supply is 75m / 52 until the start of the decay rate. 
+    // 75e6 * SafeDecimalMath.unit() / 52
+    uint public constant INITIAL_WEEKLY_SUPPLY = 1442307692307692307692307;    
+
+    // Address of the SynthetixProxy for the onlySynthetix modifier
+    address public synthetixProxy;
+
+    // Max SNX rewards for minter
+    uint public constant MAX_MINTER_REWARD = 200 * SafeDecimalMath.unit();
+
+    // How long each inflation period is before mint can be called
+    uint public constant MINT_PERIOD_DURATION = 1 weeks;
+
+    uint public constant INFLATION_START_DATE = 1551830400; // 2019-03-06T00:00:00+00:00
+    uint public constant MINT_BUFFER = 1 days;
+    uint8 public constant SUPPLY_DECAY_START = 40; // Week 40
+    uint8 public constant SUPPLY_DECAY_END = 234; //  Supply Decay ends on Week 234 (inclusive of Week 234 for a total of 195 weeks of inflation decay)
+    
+    // Weekly percentage decay of inflationary supply from the first 40 weeks of the 75% inflation rate
+    uint public constant DECAY_RATE = 12500000000000000; // 1.25% weekly
+
+    // Percentage growth of terminal supply per annum
+    uint public constant TERMINAL_SUPPLY_RATE_ANNUAL = 25000000000000000; // 2.5% pa
+    
+    constructor(
+        address _owner,
+        uint _lastMintEvent,
+        uint _currentWeek)
+        Owned(_owner)
+        public
+    {
+        lastMintEvent = _lastMintEvent;
+        weekCounter = _currentWeek;
+    }
+
+    // ========== VIEWS ==========     
+    
+    /**    
+    * @return The amount of SNX mintable for the inflationary supply
+    */
+    function mintableSupply()
+        external
+        view
+        returns (uint)
+    {
+        uint totalAmount;
+
+        if (!isMintable()) {
+            return totalAmount;
+        }
+        
+        uint remainingWeeksToMint = weeksSinceLastIssuance();
+          
+        uint currentWeek = weekCounter;
+        
+        // Calculate total mintable supply from exponential decay function
+        // The decay function stops after week 234
+        while (remainingWeeksToMint > 0) {
+            currentWeek++;            
+            
+            // If current week is before supply decay we add initial supply to mintableSupply
+            if (currentWeek < SUPPLY_DECAY_START) {
+                totalAmount = totalAmount.add(INITIAL_WEEKLY_SUPPLY);
+                remainingWeeksToMint--;
+            }
+            // if current week before supply decay ends we add the new supply for the week 
+            else if (currentWeek <= SUPPLY_DECAY_END) {
+                
+                // diff between current week and (supply decay start week - 1)  
+                uint decayCount = currentWeek.sub(SUPPLY_DECAY_START -1);
+                
+                totalAmount = totalAmount.add(tokenDecaySupplyForWeek(decayCount));
+                remainingWeeksToMint--;
+            } 
+            // Terminal supply is calculated on the total supply of Synthetix including any new supply
+            // We can compound the remaining week's supply at the fixed terminal rate  
+            else {
+                uint totalSupply = ISynthetix(synthetixProxy).totalSupply();
+                uint currentTotalSupply = totalSupply.add(totalAmount);
+
+                totalAmount = totalAmount.add(terminalInflationSupply(currentTotalSupply, remainingWeeksToMint));
+                remainingWeeksToMint = 0;
+            }
+        }
+        
+        return totalAmount;
+    }
+
+    /**
+    * @return A unit amount of decaying inflationary supply from the INITIAL_WEEKLY_SUPPLY
+    * @dev New token supply reduces by the decay rate each week calculated as supply = INITIAL_WEEKLY_SUPPLY * () 
+    */
+    function tokenDecaySupplyForWeek(uint counter)
+        public 
+        pure
+        returns (uint)
+    {   
+        // Apply exponential decay function to number of weeks since
+        // start of inflation smoothing to calculate diminishing supply for the week.
+        uint effectiveDecay = (SafeDecimalMath.unit().sub(DECAY_RATE)).powDecimal(counter);
+        uint supplyForWeek = INITIAL_WEEKLY_SUPPLY.multiplyDecimal(effectiveDecay);
+
+        return supplyForWeek;
+    }    
+    
+    /**
+    * @return A unit amount of terminal inflation supply
+    * @dev Weekly compound rate based on number of weeks     
+    */
+    function terminalInflationSupply(uint totalSupply, uint numOfWeeks)
+        public
+        pure
+        returns (uint)
+    {   
+        // rate = (1 + weekly rate) ^ num of weeks
+        uint effectiveCompoundRate = SafeDecimalMath.unit().add(TERMINAL_SUPPLY_RATE_ANNUAL.div(52)).powDecimal(numOfWeeks);
+
+        // return Supply * (effectiveRate - 1) for extra supply to issue based on number of weeks
+        return totalSupply.multiplyDecimal(effectiveCompoundRate.sub(SafeDecimalMath.unit()));
+    }
+
+    /**    
+    * @dev Take timeDiff in seconds (Dividend) and MINT_PERIOD_DURATION as (Divisor)
+    * @return Calculate the numberOfWeeks since last mint rounded down to 1 week
+    */
+    function weeksSinceLastIssuance()
+        public
+        view
+        returns (uint)
+    {
+        // Get weeks since lastMintEvent
+        // If lastMintEvent not set or 0, then start from inflation start date.
+        uint timeDiff = lastMintEvent > 0 ? now.sub(lastMintEvent) : now.sub(INFLATION_START_DATE);
+        return timeDiff.div(MINT_PERIOD_DURATION);
+    }
+
+    /**
+     * @return boolean whether the MINT_PERIOD_DURATION (7 days)
+     * has passed since the lastMintEvent.
+     * */
+    function isMintable()
+        public
+        view
+        returns (bool)
+    {
+        if (now - lastMintEvent > MINT_PERIOD_DURATION)
+        {
+            return true;
+        }
+        return false;
+    }
+
+    // ========== MUTATIVE FUNCTIONS ==========
+
+    /**
+     * @notice Record the mint event from Synthetix by incrementing the inflation 
+     * week counter for the number of weeks minted (probabaly always 1)
+     * and store the time of the event.
+     * @param supplyMinted the amount of SNX the total supply was inflated by.
+     * */
+    function recordMintEvent(uint supplyMinted)
+        external
+        onlySynthetix
+        returns (bool)
+    {
+        uint numberOfWeeksIssued = weeksSinceLastIssuance();
+
+        // add number of weeks minted to weekCounter
+        weekCounter = weekCounter.add(numberOfWeeksIssued);
+
+        // Update mint event to latest week issued (start date + number of weeks issued * seconds in week)
+        // 1 day time buffer is added so inflation is minted after feePeriod closes 
+        lastMintEvent = INFLATION_START_DATE.add(weekCounter.mul(MINT_PERIOD_DURATION)).add(MINT_BUFFER);
+
+        emit SupplyMinted(supplyMinted, numberOfWeeksIssued, lastMintEvent, now);
+        return true;
+    }
+
+    /**
+     * @notice Sets the reward amount of SNX for the caller of the public 
+     * function Synthetix.mint(). 
+     * This incentivises anyone to mint the inflationary supply and the mintr 
+     * Reward will be deducted from the inflationary supply and sent to the caller.
+     * @param amount the amount of SNX to reward the minter.
+     * */
+    function setMinterReward(uint amount)
+        external
+        onlyOwner
+    {
+        require(amount <= MAX_MINTER_REWARD, "Reward cannot exceed max minter reward");
+        minterReward = amount;
+        emit MinterRewardUpdated(minterReward);
+    }
+
+    // ========== SETTERS ========== */
+
+    /**
+     * @notice Set the SynthetixProxy should it ever change.
+     * SupplySchedule requires Synthetix address as it has the authority
+     * to record mint event.
+     * */
+    function setSynthetixProxy(ISynthetix _synthetixProxy)
+        external
+        onlyOwner
+    {
+        require(_synthetixProxy != address(0), "Address cannot be 0");
+        synthetixProxy = _synthetixProxy;
+        emit SynthetixProxyUpdated(synthetixProxy);
+    }
+
+    // ========== MODIFIERS ==========
+
+    /**
+     * @notice Only the Synthetix contract is authorised to call this function
+     * */
+    modifier onlySynthetix() {
+        require(msg.sender == address(Proxy(synthetixProxy).target()), "Only the synthetix contract can perform this action");
+        _;
+    }
+
+    /* ========== EVENTS ========== */
+    /**
+     * @notice Emitted when the inflationary supply is minted
+     * */
+    event SupplyMinted(uint supplyMinted, uint numberOfWeeksIssued, uint lastMintEvent, uint timestamp);
+
+    /**
+     * @notice Emitted when the SNX minter reward amount is updated
+     * */
+    event MinterRewardUpdated(uint newRewardAmount);
+
+    /**
+     * @notice Emitted when setSynthetixProxy is called changing the Synthetix Proxy address
+     * */
+    event SynthetixProxyUpdated(address newAddress);
+}
+
+
+interface AggregatorInterface {
+  function latestAnswer() external view returns (int256);
+  function latestTimestamp() external view returns (uint256);
+  function latestRound() external view returns (uint256);
+  function getAnswer(uint256 roundId) external view returns (int256);
+  function getTimestamp(uint256 roundId) external view returns (uint256);
+
+  event AnswerUpdated(int256 indexed current, uint256 indexed roundId, uint256 timestamp);
+  event NewRound(uint256 indexed roundId, address indexed startedBy);
+}
+
+
+// AggregatorInterface from Chainlink represents a decentralized pricing network for a single currency keys
+
+
+/**
+ * @title The repository for exchange rates
+ */
+
+contract ExchangeRates is SelfDestructible {
+
+
+    using SafeMath for uint;
+    using SafeDecimalMath for uint;
+
+    struct RateAndUpdatedTime {
+        uint216 rate;
+        uint40 time;
+    }
+
+    // Exchange rates and update times stored by currency code, e.g. 'SNX', or 'sUSD'
+    mapping(bytes32 => RateAndUpdatedTime) private _rates;
+
+    // The address of the oracle which pushes rate updates to this contract
+    address public oracle;
+
+    // Decentralized oracle networks that feed into pricing aggregators
+    mapping(bytes32 => AggregatorInterface) public aggregators;
+
+    // List of configure aggregator keys for convenient iteration
+    bytes32[] public aggregatorKeys;
+
+    // Do not allow the oracle to submit times any further forward into the future than this constant.
+    uint constant ORACLE_FUTURE_LIMIT = 10 minutes;
+
+    // How long will the contract assume the rate of any asset is correct
+    uint public rateStalePeriod = 3 hours;
+
+
+    // Each participating currency in the XDR basket is represented as a currency key with
+    // equal weighting.
+    // There are 5 participating currencies, so we'll declare that clearly.
+    bytes32[5] public xdrParticipants;
+
+    // A conveience mapping for checking if a rate is a XDR participant
+    mapping(bytes32 => bool) public isXDRParticipant;
+
+    // For inverted prices, keep a mapping of their entry, limits and frozen status
+    struct InversePricing {
+        uint entryPoint;
+        uint upperLimit;
+        uint lowerLimit;
+        bool frozen;
+    }
+    mapping(bytes32 => InversePricing) public inversePricing;
+    bytes32[] public invertedKeys;
+
+    //
+    // ========== CONSTRUCTOR ==========
+
+    /**
+     * @dev Constructor
+     * @param _owner The owner of this contract.
+     * @param _oracle The address which is able to update rate information.
+     * @param _currencyKeys The initial currency keys to store (in order).
+     * @param _newRates The initial currency amounts for each currency (in order).
+     */
+    constructor(
+        // SelfDestructible (Ownable)
+        address _owner,
+
+        // Oracle values - Allows for rate updates
+        address _oracle,
+        bytes32[] _currencyKeys,
+        uint[] _newRates
+    )
+        /* Owned is initialised in SelfDestructible */
+        SelfDestructible(_owner)
+        public
+    {
+        require(_currencyKeys.length == _newRates.length, "Currency key length and rate length must match.");
+
+        oracle = _oracle;
+
+        // The sUSD rate is always 1 and is never stale.
+        _setRate("sUSD", SafeDecimalMath.unit(), now);
+
+        // These are the currencies that make up the XDR basket.
+        // These are hard coded because:
+        //  - This way users can depend on the calculation and know it won't change for this deployment of the contract.
+        //  - Adding new currencies would likely introduce some kind of weighting factor, which
+        //    isn't worth preemptively adding when all of the currencies in the current basket are weighted at 1.
+        //  - The expectation is if this logic needs to be updated, we'll simply deploy a new version of this contract
+        //    then point the system at the new version.
+        xdrParticipants = [
+            bytes32("sUSD"),
+            bytes32("sAUD"),
+            bytes32("sCHF"),
+            bytes32("sEUR"),
+            bytes32("sGBP")
+        ];
+
+        // Mapping the XDR participants is cheaper than looping the xdrParticipants array to check if they exist
+        isXDRParticipant[bytes32("sUSD")] = true;
+        isXDRParticipant[bytes32("sAUD")] = true;
+        isXDRParticipant[bytes32("sCHF")] = true;
+        isXDRParticipant[bytes32("sEUR")] = true;
+        isXDRParticipant[bytes32("sGBP")] = true;
+
+        internalUpdateRates(_currencyKeys, _newRates, now);
+    }
+
+    function getRateAndUpdatedTime(bytes32 code) internal view returns (RateAndUpdatedTime) {
+        if (code == "XDR") {
+            // The XDR rate is the sum of the underlying XDR participant rates, and the latest
+            // timestamp from those rates
+            uint total = 0;
+            uint lastUpdated = 0;
+            for (uint i = 0; i < xdrParticipants.length; i++) {
+                RateAndUpdatedTime memory xdrEntry = getRateAndUpdatedTime(xdrParticipants[i]);
+                total = total.add(xdrEntry.rate);
+                if (xdrEntry.time > lastUpdated) {
+                    lastUpdated = xdrEntry.time;
+                }
+            }
+            return RateAndUpdatedTime({
+                rate: uint216(total),
+                time: uint40(lastUpdated)
+            });
+        } else if (aggregators[code] != address(0)) {
+            return RateAndUpdatedTime({
+                rate: uint216(aggregators[code].latestAnswer() * 1e10),
+                time: uint40(aggregators[code].latestTimestamp())
+            });
+        } else {
+            return _rates[code];
+        }
+    }
+    /**
+     * @notice Retrieves the exchange rate (sUSD per unit) for a given currency key
+     */
+    function rates(bytes32 code) public view returns(uint256) {
+        return getRateAndUpdatedTime(code).rate;
+    }
+
+    /**
+     * @notice Retrieves the timestamp the given rate was last updated.
+     */
+    function lastRateUpdateTimes(bytes32 code) public view returns(uint256) {
+        return getRateAndUpdatedTime(code).time;
+    }
+
+    /**
+     * @notice Retrieve the last update time for a list of currencies
+     */
+    function lastRateUpdateTimesForCurrencies(bytes32[] currencyKeys)
+        public
+        view
+        returns (uint[])
+    {
+        uint[] memory lastUpdateTimes = new uint[](currencyKeys.length);
+
+        for (uint i = 0; i < currencyKeys.length; i++) {
+            lastUpdateTimes[i] = lastRateUpdateTimes(currencyKeys[i]);
+        }
+
+        return lastUpdateTimes;
+    }
+
+    function _setRate(bytes32 code, uint256 rate, uint256 time) internal {
+        _rates[code] = RateAndUpdatedTime({
+            rate: uint216(rate),
+            time: uint40(time)
+        });
+    }
+
+    /* ========== SETTERS ========== */
+
+    /**
+     * @notice Set the rates stored in this contract
+     * @param currencyKeys The currency keys you wish to update the rates for (in order)
+     * @param newRates The rates for each currency (in order)
+     * @param timeSent The timestamp of when the update was sent, specified in seconds since epoch (e.g. the same as the now keyword in solidity).contract
+     *                 This is useful because transactions can take a while to confirm, so this way we know how old the oracle's datapoint was exactly even
+     *                 if it takes a long time for the transaction to confirm.
+     */
+    function updateRates(bytes32[] currencyKeys, uint[] newRates, uint timeSent)
+        external
+        onlyOracle
+        returns(bool)
+    {
+        return internalUpdateRates(currencyKeys, newRates, timeSent);
+    }
+
+    /**
+     * @notice Internal function which sets the rates stored in this contract
+     * @param currencyKeys The currency keys you wish to update the rates for (in order)
+     * @param newRates The rates for each currency (in order)
+     * @param timeSent The timestamp of when the update was sent, specified in seconds since epoch (e.g. the same as the now keyword in solidity).contract
+     *                 This is useful because transactions can take a while to confirm, so this way we know how old the oracle's datapoint was exactly even
+     *                 if it takes a long time for the transaction to confirm.
+     */
+    function internalUpdateRates(bytes32[] currencyKeys, uint[] newRates, uint timeSent)
+        internal
+        returns(bool)
+    {
+        require(currencyKeys.length == newRates.length, "Currency key array length must match rates array length.");
+        require(timeSent < (now + ORACLE_FUTURE_LIMIT), "Time is too far into the future");
+
+        // Loop through each key and perform update.
+        for (uint i = 0; i < currencyKeys.length; i++) {
+            bytes32 currencyKey = currencyKeys[i];
+
+            // Should not set any rate to zero ever, as no asset will ever be
+            // truely worthless and still valid. In this scenario, we should
+            // delete the rate and remove it from the system.
+            require(newRates[i] != 0, "Zero is not a valid rate, please call deleteRate instead.");
+            require(currencyKey != "sUSD", "Rate of sUSD cannot be updated, it's always UNIT.");
+
+            // We should only update the rate if it's at least the same age as the last rate we've got.
+            if (timeSent < lastRateUpdateTimes(currencyKey)) {
+                continue;
+            }
+
+            newRates[i] = rateOrInverted(currencyKey, newRates[i]);
+
+            // Ok, go ahead with the update.
+            _setRate(currencyKey, newRates[i], timeSent);
+        }
+
+        emit RatesUpdated(currencyKeys, newRates);
+
+        return true;
+    }
+
+    /**
+     * @notice Internal function to get the inverted rate, if any, and mark an inverted
+     *  key as frozen if either limits are reached.
+     *
+     * Inverted rates are ones that take a regular rate, perform a simple calculation (double entryPrice and
+     * subtract the rate) on them and if the result of the calculation is over or under predefined limits, it freezes the
+     * rate at that limit, preventing any future rate updates.
+     *
+     * For example, if we have an inverted rate iBTC with the following parameters set:
+     * - entryPrice of 200
+     * - upperLimit of 300
+     * - lower of 100
+     *
+     * if this function is invoked with params iETH and 184 (or rather 184e18),
+     * then the rate would be: 200 * 2 - 184 = 216. 100 < 216 < 200, so the rate would be 216,
+     * and remain unfrozen.
+     *
+     * If this function is then invoked with params iETH and 301 (or rather 301e18),
+     * then the rate would be: 200 * 2 - 301 = 99. 99 < 100, so the rate would be 100 and the
+     * rate would become frozen, no longer accepting future price updates until the synth is unfrozen
+     * by the owner function: setInversePricing().
+     *
+     * @param currencyKey The price key to lookup
+     * @param rate The rate for the given price key
+     */
+    function rateOrInverted(bytes32 currencyKey, uint rate) internal returns (uint) {
+        // if an inverse mapping exists, adjust the price accordingly
+        InversePricing storage inverse = inversePricing[currencyKey];
+        if (inverse.entryPoint <= 0) {
+            return rate;
+        }
+
+        // set the rate to the current rate initially (if it's frozen, this is what will be returned)
+        uint newInverseRate = rates(currencyKey);
+
+        // get the new inverted rate if not frozen
+        if (!inverse.frozen) {
+            uint doubleEntryPoint = inverse.entryPoint.mul(2);
+            if (doubleEntryPoint <= rate) {
+                // avoid negative numbers for unsigned ints, so set this to 0
+                // which by the requirement that lowerLimit be > 0 will
+                // cause this to freeze the price to the lowerLimit
+                newInverseRate = 0;
+            } else {
+                newInverseRate = doubleEntryPoint.sub(rate);
+            }
+
+            // now if new rate hits our limits, set it to the limit and freeze
+            if (newInverseRate >= inverse.upperLimit) {
+                newInverseRate = inverse.upperLimit;
+            } else if (newInverseRate <= inverse.lowerLimit) {
+                newInverseRate = inverse.lowerLimit;
+            }
+
+            if (newInverseRate == inverse.upperLimit || newInverseRate == inverse.lowerLimit) {
+                inverse.frozen = true;
+                emit InversePriceFrozen(currencyKey);
+            }
+        }
+
+        return newInverseRate;
+    }
+
+    /**
+     * @notice Delete a rate stored in the contract
+     * @param currencyKey The currency key you wish to delete the rate for
+     */
+    function deleteRate(bytes32 currencyKey)
+        external
+        onlyOracle
+    {
+        require(rates(currencyKey) > 0, "Rate is zero");
+
+        delete _rates[currencyKey];
+
+        emit RateDeleted(currencyKey);
+    }
+
+    /**
+     * @notice Set the Oracle that pushes the rate information to this contract
+     * @param _oracle The new oracle address
+     */
+    function setOracle(address _oracle)
+        external
+        onlyOwner
+    {
+        oracle = _oracle;
+        emit OracleUpdated(oracle);
+    }
+
+    /**
+     * @notice Set the stale period on the updated rate variables
+     * @param _time The new rateStalePeriod
+     */
+    function setRateStalePeriod(uint _time)
+        external
+        onlyOwner
+    {
+        rateStalePeriod = _time;
+        emit RateStalePeriodUpdated(rateStalePeriod);
+    }
+
+    /**
+     * @notice Set an inverse price up for the currency key.
+     *
+     * An inverse price is one which has an entryPoint, an uppper and a lower limit. Each update, the
+     * rate is calculated as double the entryPrice minus the current rate. If this calculation is
+     * above or below the upper or lower limits respectively, then the rate is frozen, and no more
+     * rate updates will be accepted.
+     *
+     * @param currencyKey The currency to update
+     * @param entryPoint The entry price point of the inverted price
+     * @param upperLimit The upper limit, at or above which the price will be frozen
+     * @param lowerLimit The lower limit, at or below which the price will be frozen
+     * @param freeze Whether or not to freeze this rate immediately. Note: no frozen event will be configured
+     * @param freezeAtUpperLimit When the freeze flag is true, this flag indicates whether the rate
+     * to freeze at is the upperLimit or lowerLimit..
+     */
+    function setInversePricing(bytes32 currencyKey, uint entryPoint, uint upperLimit, uint lowerLimit, bool freeze, bool freezeAtUpperLimit)
+        external onlyOwner
+    {
+        require(entryPoint > 0, "entryPoint must be above 0");
+        require(lowerLimit > 0, "lowerLimit must be above 0");
+        require(upperLimit > entryPoint, "upperLimit must be above the entryPoint");
+        require(upperLimit < entryPoint.mul(2), "upperLimit must be less than double entryPoint");
+        require(lowerLimit < entryPoint, "lowerLimit must be below the entryPoint");
+
+        if (inversePricing[currencyKey].entryPoint <= 0) {
+            // then we are adding a new inverse pricing, so add this
+            invertedKeys.push(currencyKey);
+        }
+        inversePricing[currencyKey].entryPoint = entryPoint;
+        inversePricing[currencyKey].upperLimit = upperLimit;
+        inversePricing[currencyKey].lowerLimit = lowerLimit;
+        inversePricing[currencyKey].frozen = freeze;
+
+        emit InversePriceConfigured(currencyKey, entryPoint, upperLimit, lowerLimit);
+
+        // When indicating to freeze, we need to know the rate to freeze it at - either upper or lower
+        // this is useful in situations where ExchangeRates is updated and there are existing inverted
+        // rates already frozen in the current contract that need persisting across the upgrade
+        if (freeze) {
+            emit InversePriceFrozen(currencyKey);
+
+            _setRate(currencyKey, freezeAtUpperLimit ? upperLimit : lowerLimit, now);
+        }
+    }
+
+    /**
+     * @notice Remove an inverse price for the currency key
+     * @param currencyKey The currency to remove inverse pricing for
+     */
+    function removeInversePricing(bytes32 currencyKey) external onlyOwner
+    {
+        require(inversePricing[currencyKey].entryPoint > 0, "No inverted price exists");
+
+        inversePricing[currencyKey].entryPoint = 0;
+        inversePricing[currencyKey].upperLimit = 0;
+        inversePricing[currencyKey].lowerLimit = 0;
+        inversePricing[currencyKey].frozen = false;
+
+        // now remove inverted key from array
+        bool wasRemoved = removeFromArray(currencyKey, invertedKeys);
+
+        if (wasRemoved) {
+            emit InversePriceConfigured(currencyKey, 0, 0, 0);
+        }
+    }
+
+    /**
+     * @notice Add a pricing aggregator for the given key. Note: existing aggregators may be overridden.
+     * @param currencyKey The currency key to add an aggregator for
+     */
+    function addAggregator(bytes32 currencyKey, address aggregatorAddress) external onlyOwner {
+        AggregatorInterface aggregator = AggregatorInterface(aggregatorAddress);
+        require(aggregator.latestTimestamp() >= 0, "Given Aggregator is invalid");
+        if (aggregators[currencyKey] == address(0)) {
+            aggregatorKeys.push(currencyKey);
+        }
+        aggregators[currencyKey] = aggregator;
+        emit AggregatorAdded(currencyKey, aggregator);
+    }
+
+    /**
+     * @notice Remove a single value from an array by iterating through until it is found.
+     * @param entry The entry to find
+     * @param array The array to mutate
+     * @return bool Whether or not the entry was found and removed
+     */
+    function removeFromArray(bytes32 entry, bytes32[] storage array) internal returns (bool) {
+        for (uint i = 0; i < array.length; i++) {
+            if (array[i] == entry) {
+                delete array[i];
+
+                // Copy the last key into the place of the one we just deleted
+                // If there's only one key, this is array[0] = array[0].
+                // If we're deleting the last one, it's also a NOOP in the same way.
+                array[i] = array[array.length - 1];
+
+                // Decrease the size of the array by one.
+                array.length--;
+
+                return true;
+            }
+        }
+        return false;
+    }
+    /**
+     * @notice Remove a pricing aggregator for the given key
+     * @param currencyKey THe currency key to remove an aggregator for
+     */
+    function removeAggregator(bytes32 currencyKey) external onlyOwner {
+        address aggregator = aggregators[currencyKey];
+        require(aggregator != address(0), "No aggregator exists for key");
+        delete aggregators[currencyKey];
+
+        bool wasRemoved = removeFromArray(currencyKey, aggregatorKeys);
+
+        if (wasRemoved) {
+            emit AggregatorRemoved(currencyKey, aggregator);
+        }
+    }
+
+    /* ========== VIEWS ========== */
+
+    /**
+     * @notice A function that lets you easily convert an amount in a source currency to an amount in the destination currency
+     * @param sourceCurrencyKey The currency the amount is specified in
+     * @param sourceAmount The source amount, specified in UNIT base
+     * @param destinationCurrencyKey The destination currency
+     */
+    function effectiveValue(bytes32 sourceCurrencyKey, uint sourceAmount, bytes32 destinationCurrencyKey)
+        public
+        view
+        rateNotStale(sourceCurrencyKey)
+        rateNotStale(destinationCurrencyKey)
+        returns (uint)
+    {
+        // If there's no change in the currency, then just return the amount they gave us
+        if (sourceCurrencyKey == destinationCurrencyKey) return sourceAmount;
+
+        // Calculate the effective value by going from source -> USD -> destination
+        return sourceAmount.multiplyDecimalRound(rateForCurrency(sourceCurrencyKey))
+            .divideDecimalRound(rateForCurrency(destinationCurrencyKey));
+    }
+
+    /**
+     * @notice Retrieve the rate for a specific currency
+     */
+    function rateForCurrency(bytes32 currencyKey)
+        public
+        view
+        returns (uint)
+    {
+        return rates(currencyKey);
+    }
+
+    /**
+     * @notice Retrieve the rates for a list of currencies
+     */
+    function ratesForCurrencies(bytes32[] currencyKeys)
+        public
+        view
+        returns (uint[])
+    {
+        uint[] memory _localRates = new uint[](currencyKeys.length);
+
+        for (uint i = 0; i < currencyKeys.length; i++) {
+            _localRates[i] = rates(currencyKeys[i]);
+        }
+
+        return _localRates;
+    }
+
+    /**
+     * @notice Retrieve the rates and isAnyStale for a list of currencies
+     */
+    function ratesAndStaleForCurrencies(bytes32[] currencyKeys)
+        public
+        view
+        returns (uint[], bool)
+    {
+        uint[] memory _localRates = new uint[](currencyKeys.length);
+
+        bool anyRateStale = false;
+        uint period = rateStalePeriod;
+        for (uint i = 0; i < currencyKeys.length; i++) {
+            RateAndUpdatedTime memory rateAndUpdateTime = getRateAndUpdatedTime(currencyKeys[i]);
+            _localRates[i] = uint256(rateAndUpdateTime.rate);
+            if (!anyRateStale) {
+                anyRateStale = (currencyKeys[i] != "sUSD" && uint256(rateAndUpdateTime.time).add(period) < now);
+            }
+        }
+
+        return (_localRates, anyRateStale);
+    }
+
+    /**
+     * @notice Check if a specific currency's rate hasn't been updated for longer than the stale period.
+     */
+    function rateIsStale(bytes32 currencyKey)
+        public
+        view
+        returns (bool)
+    {
+        // sUSD is a special case and is never stale.
+        if (currencyKey == "sUSD") return false;
+
+        return lastRateUpdateTimes(currencyKey).add(rateStalePeriod) < now;
+    }
+
+    /**
+     * @notice Check if any rate is frozen (cannot be exchanged into)
+     */
+    function rateIsFrozen(bytes32 currencyKey)
+        external
+        view
+        returns (bool)
+    {
+        return inversePricing[currencyKey].frozen;
+    }
+
+
+    /**
+     * @notice Check if any of the currency rates passed in haven't been updated for longer than the stale period.
+     */
+    function anyRateIsStale(bytes32[] currencyKeys)
+        external
+        view
+        returns (bool)
+    {
+        // Loop through each key and check whether the data point is stale.
+        uint256 i = 0;
+
+        while (i < currencyKeys.length) {
+            // sUSD is a special case and is never false
+            if (currencyKeys[i] != "sUSD" && lastRateUpdateTimes(currencyKeys[i]).add(rateStalePeriod) < now) {
+                return true;
+            }
+            i += 1;
+        }
+
+        return false;
+    }
+
+    /* ========== MODIFIERS ========== */
+
+    modifier rateNotStale(bytes32 currencyKey) {
+        require(!rateIsStale(currencyKey), "Rate stale or nonexistant currency");
+        _;
+    }
+
+    modifier onlyOracle
+    {
+        require(msg.sender == oracle, "Only the oracle can perform this action");
+        _;
+    }
+
+    /* ========== EVENTS ========== */
+
+    event OracleUpdated(address newOracle);
+    event RateStalePeriodUpdated(uint rateStalePeriod);
+    event RatesUpdated(bytes32[] currencyKeys, uint[] newRates);
+    event RateDeleted(bytes32 currencyKey);
+    event InversePriceConfigured(bytes32 currencyKey, uint entryPoint, uint upperLimit, uint lowerLimit);
+    event InversePriceFrozen(bytes32 currencyKey);
+    event AggregatorAdded(bytes32 currencyKey, address aggregator);
+    event AggregatorRemoved(bytes32 currencyKey, address aggregator);
+}
+
+
+/*
+-----------------------------------------------------------------
+FILE INFORMATION
+-----------------------------------------------------------------
+
+file:       LimitedSetup.sol
+version:    1.1
+author:     Anton Jurisevic
+
+date:       2018-05-15
+
+-----------------------------------------------------------------
+MODULE DESCRIPTION
+-----------------------------------------------------------------
+
+A contract with a limited setup period. Any function modified
+with the setup modifier will cease to work after the
+conclusion of the configurable-length post-construction setup period.
+
+-----------------------------------------------------------------
+*/
+
+
+/**
+ * @title Any function decorated with the modifier this contract provides
+ * deactivates after a specified setup period.
+ */
+contract LimitedSetup {
+
+    uint setupExpiryTime;
+
+    /**
+     * @dev LimitedSetup Constructor.
+     * @param setupDuration The time the setup period will last for.
+     */
+    constructor(uint setupDuration)
+        public
+    {
+        setupExpiryTime = now + setupDuration;
+    }
+
+    modifier onlyDuringSetup
+    {
+        require(now < setupExpiryTime, "Can only perform this action during setup");
+        _;
+    }
+}
+
+
+/*
+-----------------------------------------------------------------
+FILE INFORMATION
+-----------------------------------------------------------------
+
+file:       SynthetixState.sol
+version:    1.0
+author:     Kevin Brown
+date:       2018-10-19
+
+-----------------------------------------------------------------
+MODULE DESCRIPTION
+-----------------------------------------------------------------
+
+A contract that holds issuance state and preferred currency of
+users in the Synthetix system.
+
+This contract is used side by side with the Synthetix contract
+to make it easier to upgrade the contract logic while maintaining
+issuance state.
+
+The Synthetix contract is also quite large and on the edge of
+being beyond the contract size limit without moving this information
+out to another contract.
+
+The first deployed contract would create this state contract,
+using it as its store of issuance data.
+
+When a new contract is deployed, it links to the existing
+state contract, whose owner would then change its associated
+contract to the new one.
+
+-----------------------------------------------------------------
+*/
+
+
+/**
+ * @title Synthetix State
+ * @notice Stores issuance information and preferred currency information of the Synthetix contract.
+ */
+contract SynthetixState is State, LimitedSetup {
+    using SafeMath for uint;
+    using SafeDecimalMath for uint;
+
+    // A struct for handing values associated with an individual user's debt position
+    struct IssuanceData {
+        // Percentage of the total debt owned at the time
+        // of issuance. This number is modified by the global debt
+        // delta array. You can figure out a user's exit price and
+        // collateralisation ratio using a combination of their initial
+        // debt and the slice of global debt delta which applies to them.
+        uint initialDebtOwnership;
+        // This lets us know when (in relative terms) the user entered
+        // the debt pool so we can calculate their exit price and
+        // collateralistion ratio
+        uint debtEntryIndex;
+    }
+
+    // Issued synth balances for individual fee entitlements and exit price calculations
+    mapping(address => IssuanceData) public issuanceData;
+
+    // The total count of people that have outstanding issued synths in any flavour
+    uint public totalIssuerCount;
+
+    // Global debt pool tracking
+    uint[] public debtLedger;
+
+    // Import state
+    uint public importedXDRAmount;
+
+    // A quantity of synths greater than this ratio
+    // may not be issued against a given value of SNX.
+    uint public issuanceRatio = SafeDecimalMath.unit() / 5;
+    // No more synths may be issued than the value of SNX backing them.
+    uint constant MAX_ISSUANCE_RATIO = SafeDecimalMath.unit();
+
+    // Users can specify their preferred currency, in which case all synths they receive
+    // will automatically exchange to that preferred currency upon receipt in their wallet
+    mapping(address => bytes4) public preferredCurrency;
+
+    /**
+     * @dev Constructor
+     * @param _owner The address which controls this contract.
+     * @param _associatedContract The ERC20 contract whose state this composes.
+     */
+    constructor(address _owner, address _associatedContract)
+        State(_owner, _associatedContract)
+        LimitedSetup(1 weeks)
+        public
+    {}
+
+    /* ========== SETTERS ========== */
+
+    /**
+     * @notice Set issuance data for an address
+     * @dev Only the associated contract may call this.
+     * @param account The address to set the data for.
+     * @param initialDebtOwnership The initial debt ownership for this address.
+     */
+    function setCurrentIssuanceData(address account, uint initialDebtOwnership)
+        external
+        onlyAssociatedContract
+    {
+        issuanceData[account].initialDebtOwnership = initialDebtOwnership;
+        issuanceData[account].debtEntryIndex = debtLedger.length;
+    }
+
+    /**
+     * @notice Clear issuance data for an address
+     * @dev Only the associated contract may call this.
+     * @param account The address to clear the data for.
+     */
+    function clearIssuanceData(address account)
+        external
+        onlyAssociatedContract
+    {
+        delete issuanceData[account];
+    }
+
+    /**
+     * @notice Increment the total issuer count
+     * @dev Only the associated contract may call this.
+     */
+    function incrementTotalIssuerCount()
+        external
+        onlyAssociatedContract
+    {
+        totalIssuerCount = totalIssuerCount.add(1);
+    }
+
+    /**
+     * @notice Decrement the total issuer count
+     * @dev Only the associated contract may call this.
+     */
+    function decrementTotalIssuerCount()
+        external
+        onlyAssociatedContract
+    {
+        totalIssuerCount = totalIssuerCount.sub(1);
+    }
+
+    /**
+     * @notice Append a value to the debt ledger
+     * @dev Only the associated contract may call this.
+     * @param value The new value to be added to the debt ledger.
+     */
+    function appendDebtLedgerValue(uint value)
+        external
+        onlyAssociatedContract
+    {
+        debtLedger.push(value);
+    }
+
+    /**
+     * @notice Set preferred currency for a user
+     * @dev Only the associated contract may call this.
+     * @param account The account to set the preferred currency for
+     * @param currencyKey The new preferred currency
+     */
+    function setPreferredCurrency(address account, bytes4 currencyKey)
+        external
+        onlyAssociatedContract
+    {
+        preferredCurrency[account] = currencyKey;
+    }
+
+    /**
+     * @notice Set the issuanceRatio for issuance calculations.
+     * @dev Only callable by the contract owner.
+     */
+    function setIssuanceRatio(uint _issuanceRatio)
+        external
+        onlyOwner
+    {
+        require(_issuanceRatio <= MAX_ISSUANCE_RATIO, "New issuance ratio cannot exceed MAX_ISSUANCE_RATIO");
+        issuanceRatio = _issuanceRatio;
+        emit IssuanceRatioUpdated(_issuanceRatio);
+    }
+
+    /**
+     * @notice Import issuer data from the old Synthetix contract before multicurrency
+     * @dev Only callable by the contract owner, and only for 1 week after deployment.
+     */
+    function importIssuerData(address[] accounts, uint[] sUSDAmounts)
+        external
+        onlyOwner
+        onlyDuringSetup
+    {
+        require(accounts.length == sUSDAmounts.length, "Length mismatch");
+
+        for (uint8 i = 0; i < accounts.length; i++) {
+            _addToDebtRegister(accounts[i], sUSDAmounts[i]);
+        }
+    }
+
+    /**
+     * @notice Import issuer data from the old Synthetix contract before multicurrency
+     * @dev Only used from importIssuerData above, meant to be disposable
+     */
+    function _addToDebtRegister(address account, uint amount)
+        internal
+    {
+        // This code is duplicated from Synthetix so that we can call it directly here
+        // during setup only.
+        Synthetix synthetix = Synthetix(associatedContract);
+
+        // What is the value of the requested debt in XDRs?
+        uint xdrValue = synthetix.effectiveValue("sUSD", amount, "XDR");
+
+        // What is the value that we've previously imported?
+        uint totalDebtIssued = importedXDRAmount;
+
+        // What will the new total be including the new value?
+        uint newTotalDebtIssued = xdrValue.add(totalDebtIssued);
+
+        // Save that for the next import.
+        importedXDRAmount = newTotalDebtIssued;
+
+        // What is their percentage (as a high precision int) of the total debt?
+        uint debtPercentage = xdrValue.divideDecimalRoundPrecise(newTotalDebtIssued);
+
+        // And what effect does this percentage have on the global debt holding of other issuers?
+        // The delta specifically needs to not take into account any existing debt as it's already
+        // accounted for in the delta from when they issued previously.
+        // The delta is a high precision integer.
+        uint delta = SafeDecimalMath.preciseUnit().sub(debtPercentage);
+
+        uint existingDebt = synthetix.debtBalanceOf(account, "XDR");
+
+        // And what does their debt ownership look like including this previous stake?
+        if (existingDebt > 0) {
+            debtPercentage = xdrValue.add(existingDebt).divideDecimalRoundPrecise(newTotalDebtIssued);
+        }
+
+        // Are they a new issuer? If so, record them.
+        if (issuanceData[account].initialDebtOwnership == 0) {
+            totalIssuerCount = totalIssuerCount.add(1);
+        }
+
+        // Save the debt entry parameters
+        issuanceData[account].initialDebtOwnership = debtPercentage;
+        issuanceData[account].debtEntryIndex = debtLedger.length;
+
+        // And if we're the first, push 1 as there was no effect to any other holders, otherwise push
+        // the change for the rest of the debt holders. The debt ledger holds high precision integers.
+        if (debtLedger.length > 0) {
+            debtLedger.push(
+                debtLedger[debtLedger.length - 1].multiplyDecimalRoundPrecise(delta)
+            );
+        } else {
+            debtLedger.push(SafeDecimalMath.preciseUnit());
+        }
+    }
+
+    /* ========== VIEWS ========== */
+
+    /**
+     * @notice Retrieve the length of the debt ledger array
+     */
+    function debtLedgerLength()
+        external
+        view
+        returns (uint)
+    {
+        return debtLedger.length;
+    }
+
+    /**
+     * @notice Retrieve the most recent entry from the debt ledger
+     */
+    function lastDebtLedgerEntry()
+        external
+        view
+        returns (uint)
+    {
+        return debtLedger[debtLedger.length - 1];
+    }
+
+    /**
+     * @notice Query whether an account has issued and has an outstanding debt balance
+     * @param account The address to query for
+     */
+    function hasIssued(address account)
+        external
+        view
+        returns (bool)
+    {
+        return issuanceData[account].initialDebtOwnership > 0;
+    }
+
+    event IssuanceRatioUpdated(uint newRatio);
+}
+
+
+/**
+ * @title RewardsDistribution interface
+ */
+interface IRewardsDistribution {
+    function distributeRewards(uint amount) external;
+}
+
+
+/**
+ * @title Synthetix ERC20 contract.
+ * @notice The Synthetix contracts not only facilitates transfers, exchanges, and tracks balances,
+ * but it also computes the quantity of fees each synthetix holder is entitled to.
+ */
+contract Synthetix is ExternStateToken {
+
+    // ========== STATE VARIABLES ==========
+
+    // Available Synths which can be used with the system
+    Synth[] public availableSynths;
+    mapping(bytes32 => Synth) public synths;
+    mapping(address => bytes32) public synthsByAddress;
+
+    IFeePool public feePool;
+    ISynthetixEscrow public escrow;
+    ISynthetixEscrow public rewardEscrow;
+    ExchangeRates public exchangeRates;
+    SynthetixState public synthetixState;
+    SupplySchedule public supplySchedule;
+    IRewardsDistribution public rewardsDistribution;
+
+    bool private protectionCircuit = false;
+
+    string constant TOKEN_NAME = "Synthetix Network Token";
+    string constant TOKEN_SYMBOL = "SNX";
+    uint8 constant DECIMALS = 18;
+    bool public exchangeEnabled = true;
+    uint public gasPriceLimit;
+
+    address public gasLimitOracle;
+    // ========== CONSTRUCTOR ==========
+
+    /**
+     * @dev Constructor
+     * @param _proxy The main token address of the Proxy contract. This will be ProxyERC20.sol
+     * @param _tokenState Address of the external immutable contract containing token balances.
+     * @param _synthetixState External immutable contract containing the SNX minters debt ledger.
+     * @param _owner The owner of this contract.
+     * @param _exchangeRates External immutable contract where the price oracle pushes prices onchain too.
+     * @param _feePool External upgradable contract handling SNX Fees and Rewards claiming
+     * @param _supplySchedule External immutable contract with the SNX inflationary supply schedule
+     * @param _rewardEscrow External immutable contract for SNX Rewards Escrow
+     * @param _escrow External immutable contract for SNX Token Sale Escrow
+     * @param _rewardsDistribution External immutable contract managing the Rewards Distribution of the SNX inflationary supply
+     * @param _totalSupply On upgrading set to reestablish the current total supply (This should be in SynthetixState if ever updated)
+     */
+    constructor(address _proxy, TokenState _tokenState, SynthetixState _synthetixState,
+        address _owner, ExchangeRates _exchangeRates, IFeePool _feePool, SupplySchedule _supplySchedule,
+        ISynthetixEscrow _rewardEscrow, ISynthetixEscrow _escrow, IRewardsDistribution _rewardsDistribution, uint _totalSupply
+    )
+        ExternStateToken(_proxy, _tokenState, TOKEN_NAME, TOKEN_SYMBOL, _totalSupply, DECIMALS, _owner)
+        public
+    {
+        synthetixState = _synthetixState;
+        exchangeRates = _exchangeRates;
+        feePool = _feePool;
+        supplySchedule = _supplySchedule;
+        rewardEscrow = _rewardEscrow;
+        escrow = _escrow;
+        rewardsDistribution = _rewardsDistribution;
+    }
+    // ========== SETTERS ========== */
+
+    function setFeePool(IFeePool _feePool)
+        external
+        optionalProxy_onlyOwner
+    {
+        feePool = _feePool;
+    }
+
+    function setExchangeRates(ExchangeRates _exchangeRates)
+        external
+        optionalProxy_onlyOwner
+    {
+        exchangeRates = _exchangeRates;
+    }
+
+    function setProtectionCircuit(bool _protectionCircuitIsActivated)
+        external
+        onlyOracle
+    {
+        protectionCircuit = _protectionCircuitIsActivated;
+    }
+
+    function setExchangeEnabled(bool _exchangeEnabled)
+        external
+        optionalProxy_onlyOwner
+    {
+        exchangeEnabled = _exchangeEnabled;
+    }
+
+    function setGasLimitOracle(address _gasLimitOracle)
+        external
+        optionalProxy_onlyOwner
+    {
+        gasLimitOracle = _gasLimitOracle;
+    }
+
+    function setGasPriceLimit(uint _gasPriceLimit)
+        external
+    {
+        require(msg.sender == gasLimitOracle, "Only gas limit oracle allowed");
+        require(_gasPriceLimit > 0, "Needs to be greater than 0");
+        gasPriceLimit = _gasPriceLimit;
+    }
+
+    /**
+     * @notice Add an associated Synth contract to the Synthetix system
+     * @dev Only the contract owner may call this.
+     */
+    function addSynth(Synth synth)
+        external
+        optionalProxy_onlyOwner
+    {
+        bytes32 currencyKey = synth.currencyKey();
+
+        require(synths[currencyKey] == Synth(0), "Synth already exists");
+        require(synthsByAddress[synth] == bytes32(0), "Synth address already exists");
+
+        availableSynths.push(synth);
+        synths[currencyKey] = synth;
+        synthsByAddress[synth] = currencyKey;
+    }
+
+    /**
+     * @notice Remove an associated Synth contract from the Synthetix system
+     * @dev Only the contract owner may call this.
+     */
+    function removeSynth(bytes32 currencyKey)
+        external
+        optionalProxy_onlyOwner
+    {
+        require(synths[currencyKey] != address(0), "Synth does not exist");
+        require(synths[currencyKey].totalSupply() == 0, "Synth supply exists");
+        require(currencyKey != "XDR" && currencyKey != "sUSD", "Cannot remove synth");        
+
+        // Save the address we're removing for emitting the event at the end.
+        address synthToRemove = synths[currencyKey];
+
+        // Remove the synth from the availableSynths array.
+        for (uint i = 0; i < availableSynths.length; i++) {
+            if (availableSynths[i] == synthToRemove) {
+                delete availableSynths[i];
+
+                // Copy the last synth into the place of the one we just deleted
+                // If there's only one synth, this is synths[0] = synths[0].
+                // If we're deleting the last one, it's also a NOOP in the same way.
+                availableSynths[i] = availableSynths[availableSynths.length - 1];
+
+                // Decrease the size of the array by one.
+                availableSynths.length--;
+
+                break;
+            }
+        }
+
+        // And remove it from the synths mapping
+        delete synthsByAddress[synths[currencyKey]];
+        delete synths[currencyKey];
+
+        // Note: No event here as Synthetix contract exceeds max contract size
+        // with these events, and it's unlikely people will need to
+        // track these events specifically.
+    }
+
+    // ========== VIEWS ==========
+
+    /**
+     * @notice A function that lets you easily convert an amount in a source currency to an amount in the destination currency
+     * @param sourceCurrencyKey The currency the amount is specified in
+     * @param sourceAmount The source amount, specified in UNIT base
+     * @param destinationCurrencyKey The destination currency
+     */
+    function effectiveValue(bytes32 sourceCurrencyKey, uint sourceAmount, bytes32 destinationCurrencyKey)
+        public
+        view
+        returns (uint)
+    {
+        return exchangeRates.effectiveValue(sourceCurrencyKey, sourceAmount, destinationCurrencyKey);
+    }
+
+    /**
+     * @notice Total amount of synths issued by the system, priced in currencyKey
+     * @param currencyKey The currency to value the synths in
+     */
+    function totalIssuedSynths(bytes32 currencyKey)
+        public
+        view
+        returns (uint)
+    {
+        uint total = 0;
+        uint currencyRate = exchangeRates.rateForCurrency(currencyKey);
+
+        (uint[] memory rates, bool anyRateStale) = exchangeRates.ratesAndStaleForCurrencies(availableCurrencyKeys());
+        require(!anyRateStale, "Rates are stale");
+
+        for (uint i = 0; i < availableSynths.length; i++) {
+            // What's the total issued value of that synth in the destination currency?
+            // Note: We're not using our effectiveValue function because we don't want to go get the
+            //       rate for the destination currency and check if it's stale repeatedly on every
+            //       iteration of the loop
+            uint synthValue = availableSynths[i].totalSupply()
+                .multiplyDecimalRound(rates[i]);
+            total = total.add(synthValue);
+        }
+
+        return total.divideDecimalRound(currencyRate);
+    }
+
+    /**
+     * @notice Returns the currencyKeys of availableSynths for rate checking
+     */
+    function availableCurrencyKeys()
+        public
+        view
+        returns (bytes32[])
+    {
+        bytes32[] memory currencyKeys = new bytes32[](availableSynths.length);
+
+        for (uint i = 0; i < availableSynths.length; i++) {
+            currencyKeys[i] = synthsByAddress[availableSynths[i]];
+        }
+
+        return currencyKeys;
+    }
+
+    /**
+     * @notice Returns the count of available synths in the system, which you can use to iterate availableSynths
+     */
+    function availableSynthCount()
+        public
+        view
+        returns (uint)
+    {
+        return availableSynths.length;
+    }
+
+    /**
+     * @notice Determine the effective fee rate for the exchange, taking into considering swing trading
+     */
+    function feeRateForExchange(bytes32 sourceCurrencyKey, bytes32 destinationCurrencyKey)
+        public
+        view
+        returns (uint)
+    {
+        // Get the base exchange fee rate
+        uint exchangeFeeRate = feePool.exchangeFeeRate();
+
+        uint multiplier = 1;
+
+        // Is this a swing trade? I.e. long to short or vice versa, excluding when going into or out of sUSD.
+        // Note: this assumes shorts begin with 'i' and longs with 's'.
+        if (
+            (sourceCurrencyKey[0] == 0x73 && sourceCurrencyKey != "sUSD" && destinationCurrencyKey[0] == 0x69) ||
+            (sourceCurrencyKey[0] == 0x69 && destinationCurrencyKey != "sUSD" && destinationCurrencyKey[0] == 0x73)
+        ) {
+            // If so then double the exchange fee multipler
+            multiplier = 2;
+        }
+
+        return exchangeFeeRate.mul(multiplier);
+    }
+    // ========== MUTATIVE FUNCTIONS ==========
+    
+    /**
+     * @notice ERC20 transfer function.
+     */
+    function transfer(address to, uint value)
+        public
+        optionalProxy
+        returns (bool)
+    {
+        // Ensure they're not trying to exceed their staked SNX amount
+        require(value <= transferableSynthetix(messageSender), "Cannot transfer staked or escrowed SNX");
+
+        // Perform the transfer: if there is a problem an exception will be thrown in this call.
+        _transfer_byProxy(messageSender, to, value);
+
+        return true;
+    }
+
+     /**
+     * @notice ERC20 transferFrom function.
+     */
+    function transferFrom(address from, address to, uint value)
+        public
+        optionalProxy
+        returns (bool)
+    {
+        // Ensure they're not trying to exceed their locked amount
+        require(value <= transferableSynthetix(from), "Cannot transfer staked or escrowed SNX");
+
+        // Perform the transfer: if there is a problem,
+        // an exception will be thrown in this call.
+        return _transferFrom_byProxy(messageSender, from, to, value);         
+    }
+
+    /**
+     * @notice Function that allows you to exchange synths you hold in one flavour for another.
+     * @param sourceCurrencyKey The source currency you wish to exchange from
+     * @param sourceAmount The amount, specified in UNIT of source currency you wish to exchange
+     * @param destinationCurrencyKey The destination currency you wish to obtain.
+     * @return Boolean that indicates whether the transfer succeeded or failed.
+     */
+    function exchange(bytes32 sourceCurrencyKey, uint sourceAmount, bytes32 destinationCurrencyKey)
+        external
+        optionalProxy
+        // Note: We don't need to insist on non-stale rates because effectiveValue will do it for us.
+        returns (bool)
+    {
+        require(sourceCurrencyKey != destinationCurrencyKey, "Can't be same synth");
+        require(sourceAmount > 0, "Zero amount");
+
+        // verify gas price limit
+        validateGasPrice(tx.gasprice);
+
+        //  If the oracle has set protectionCircuit to true then burn the synths
+        if (protectionCircuit) {
+            synths[sourceCurrencyKey].burn(messageSender, sourceAmount);
+            return true;
+        } else {
+            // Pass it along, defaulting to the sender as the recipient.
+            return _internalExchange(
+                messageSender,
+                sourceCurrencyKey,
+                sourceAmount,
+                destinationCurrencyKey,
+                messageSender,
+                true // Charge fee on the exchange
+            );
+        }
+    }
+
+    /*
+        @dev validate that the given gas price is less than or equal to the gas price limit
+        @param _gasPrice tested gas price
+    */
+    function validateGasPrice(uint _givenGasPrice)
+        public
+        view
+    {
+        require(_givenGasPrice <= gasPriceLimit, "Gas price above limit");
+    }
+
+    /**
+     * @notice Function that allows synth contract to delegate exchanging of a synth that is not the same sourceCurrency
+     * @dev Only the synth contract can call this function
+     * @param from The address to exchange / burn synth from
+     * @param sourceCurrencyKey The source currency you wish to exchange from
+     * @param sourceAmount The amount, specified in UNIT of source currency you wish to exchange
+     * @param destinationCurrencyKey The destination currency you wish to obtain.
+     * @param destinationAddress Where the result should go.
+     * @return Boolean that indicates whether the transfer succeeded or failed.
+     */
+    function synthInitiatedExchange(
+        address from,
+        bytes32 sourceCurrencyKey,
+        uint sourceAmount,
+        bytes32 destinationCurrencyKey,
+        address destinationAddress
+    )
+        external
+        optionalProxy
+        returns (bool)
+    {
+        require(synthsByAddress[messageSender] != bytes32(0), "Only synth allowed");
+        require(sourceCurrencyKey != destinationCurrencyKey, "Can't be same synth");
+        require(sourceAmount > 0, "Zero amount");
+
+        // Pass it along
+        return _internalExchange(
+            from,
+            sourceCurrencyKey,
+            sourceAmount,
+            destinationCurrencyKey,
+            destinationAddress,
+            false
+        );
+    }
+
+    /**
+     * @notice Function that allows synth contract to delegate sending fee to the fee Pool.
+     * @dev fee pool contract address is not allowed to call function
+     * @param from The address to move synth from
+     * @param sourceCurrencyKey source currency from.
+     * @param sourceAmount The amount, specified in UNIT of source currency.
+     * @param destinationCurrencyKey The destination currency to obtain.
+     * @param destinationAddress Where the result should go.
+     * @param chargeFee Boolean to charge a fee for exchange.
+     * @return Boolean that indicates whether the transfer succeeded or failed.
+     */
+    function _internalExchange(
+        address from,
+        bytes32 sourceCurrencyKey,
+        uint sourceAmount,
+        bytes32 destinationCurrencyKey,
+        address destinationAddress,
+        bool chargeFee
+    )
+        internal
+        returns (bool)
+    {
+        require(exchangeEnabled, "Exchanging is disabled");
+
+        // Note: We don't need to check their balance as the burn() below will do a safe subtraction which requires
+        // the subtraction to not overflow, which would happen if their balance is not sufficient.
+
+        // Burn the source amount
+        synths[sourceCurrencyKey].burn(from, sourceAmount);
+
+        // How much should they get in the destination currency?
+        uint destinationAmount = effectiveValue(sourceCurrencyKey, sourceAmount, destinationCurrencyKey);
+
+        // What's the fee on that currency that we should deduct?
+        uint amountReceived = destinationAmount;
+        uint fee = 0;
+
+        if (chargeFee) {
+            // Get the exchange fee rate
+            uint exchangeFeeRate = feeRateForExchange(sourceCurrencyKey, destinationCurrencyKey);
+
+            amountReceived = destinationAmount.multiplyDecimal(SafeDecimalMath.unit().sub(exchangeFeeRate));
+
+            fee = destinationAmount.sub(amountReceived);
+        }
+
+        // Issue their new synths
+        synths[destinationCurrencyKey].issue(destinationAddress, amountReceived);
+
+        // Remit the fee in XDRs
+        if (fee > 0) {
+            uint xdrFeeAmount = effectiveValue(destinationCurrencyKey, fee, "XDR");
+            synths["XDR"].issue(feePool.FEE_ADDRESS(), xdrFeeAmount);
+            // Tell the fee pool about this.
+            feePool.recordFeePaid(xdrFeeAmount);
+        }
+
+        // Nothing changes as far as issuance data goes because the total value in the system hasn't changed.        
+
+        //Let the DApps know there was a Synth exchange
+        emitSynthExchange(from, sourceCurrencyKey, sourceAmount, destinationCurrencyKey, amountReceived, destinationAddress);
+
+        return true;
+    }
+
+    /**
+     * @notice Function that registers new synth as they are issued. Calculate delta to append to synthetixState.
+     * @dev Only internal calls from synthetix address.
+     * @param currencyKey The currency to register synths in, for example sUSD or sAUD
+     * @param amount The amount of synths to register with a base of UNIT
+     */
+    function _addToDebtRegister(bytes32 currencyKey, uint amount)
+        internal
+    {
+        // What is the value of the requested debt in XDRs?
+        uint xdrValue = effectiveValue(currencyKey, amount, "XDR");
+
+        // What is the value of all issued synths of the system (priced in XDRs)?
+        uint totalDebtIssued = totalIssuedSynths("XDR");
+
+        // What will the new total be including the new value?
+        uint newTotalDebtIssued = xdrValue.add(totalDebtIssued);
+
+        // What is their percentage (as a high precision int) of the total debt?
+        uint debtPercentage = xdrValue.divideDecimalRoundPrecise(newTotalDebtIssued);
+
+        // And what effect does this percentage change have on the global debt holding of other issuers?
+        // The delta specifically needs to not take into account any existing debt as it's already
+        // accounted for in the delta from when they issued previously.
+        // The delta is a high precision integer.
+        uint delta = SafeDecimalMath.preciseUnit().sub(debtPercentage);
+
+        // How much existing debt do they have?
+        uint existingDebt = debtBalanceOf(messageSender, "XDR");
+
+        // And what does their debt ownership look like including this previous stake?
+        if (existingDebt > 0) {
+            debtPercentage = xdrValue.add(existingDebt).divideDecimalRoundPrecise(newTotalDebtIssued);
+        }
+
+        // Are they a new issuer? If so, record them.
+        if (existingDebt == 0) {
+            synthetixState.incrementTotalIssuerCount();
+        }
+
+        // Save the debt entry parameters
+        synthetixState.setCurrentIssuanceData(messageSender, debtPercentage);
+
+        // And if we're the first, push 1 as there was no effect to any other holders, otherwise push
+        // the change for the rest of the debt holders. The debt ledger holds high precision integers.
+        if (synthetixState.debtLedgerLength() > 0) {
+            synthetixState.appendDebtLedgerValue(
+                synthetixState.lastDebtLedgerEntry().multiplyDecimalRoundPrecise(delta)
+            );
+        } else {
+            synthetixState.appendDebtLedgerValue(SafeDecimalMath.preciseUnit());
+        }
+    }
+
+    /**
+     * @notice Issue synths against the sender's SNX.
+     * @dev Issuance is only allowed if the synthetix price isn't stale. Amount should be larger than 0.
+     * @param amount The amount of synths you wish to issue with a base of UNIT
+     */
+    function issueSynths(uint amount)
+        public
+        optionalProxy
+        // No need to check if price is stale, as it is checked in issuableSynths.
+    {
+        bytes32 currencyKey = "sUSD";
+
+        require(amount <= remainingIssuableSynths(messageSender, currencyKey), "Amount too large");
+
+        // Keep track of the debt they're about to create
+        _addToDebtRegister(currencyKey, amount);
+
+        // Create their synths
+        synths[currencyKey].issue(messageSender, amount);
+
+        // Store their locked SNX amount to determine their fee % for the period
+        _appendAccountIssuanceRecord();
+    }
+
+    /**
+     * @notice Issue the maximum amount of Synths possible against the sender's SNX.
+     * @dev Issuance is only allowed if the synthetix price isn't stale.
+     */
+    function issueMaxSynths()
+        external
+        optionalProxy
+    {
+        bytes32 currencyKey = "sUSD";
+
+        // Figure out the maximum we can issue in that currency
+        uint maxIssuable = remainingIssuableSynths(messageSender, currencyKey);
+
+        // Keep track of the debt they're about to create
+        _addToDebtRegister(currencyKey, maxIssuable);
+
+        // Create their synths
+        synths[currencyKey].issue(messageSender, maxIssuable);
+
+        // Store their locked SNX amount to determine their fee % for the period
+        _appendAccountIssuanceRecord();
+    }
+
+    /**
+     * @notice Burn synths to clear issued synths/free SNX.
+     * @param amount The amount (in UNIT base) you wish to burn
+     * @dev The amount to burn is debased to XDR's
+     */
+    function burnSynths(uint amount)
+        external
+        optionalProxy
+        // No need to check for stale rates as effectiveValue checks rates
+    {
+        bytes32 currencyKey = "sUSD";
+
+        // How much debt do they have?
+        uint debtToRemove = effectiveValue(currencyKey, amount, "XDR");
+        uint existingDebt = debtBalanceOf(messageSender, "XDR");
+
+        uint debtInCurrencyKey = debtBalanceOf(messageSender, currencyKey);
+
+        require(existingDebt > 0, "No debt to forgive");
+
+        // If they're trying to burn more debt than they actually owe, rather than fail the transaction, let's just
+        // clear their debt and leave them be.
+        uint amountToRemove = existingDebt < debtToRemove ? existingDebt : debtToRemove;
+
+        // Remove their debt from the ledger
+        _removeFromDebtRegister(amountToRemove, existingDebt);
+
+        uint amountToBurn = debtInCurrencyKey < amount ? debtInCurrencyKey : amount;
+
+        // synth.burn does a safe subtraction on balance (so it will revert if there are not enough synths).
+        synths[currencyKey].burn(messageSender, amountToBurn);
+
+        // Store their debtRatio against a feeperiod to determine their fee/rewards % for the period
+        _appendAccountIssuanceRecord();
+    }
+
+    /**
+     * @notice Store in the FeePool the users current debt value in the system in XDRs.
+     * @dev debtBalanceOf(messageSender, "XDR") to be used with totalIssuedSynths("XDR") to get
+     *  users % of the system within a feePeriod.
+     */
+    function _appendAccountIssuanceRecord()
+        internal
+    {
+        uint initialDebtOwnership;
+        uint debtEntryIndex;
+        (initialDebtOwnership, debtEntryIndex) = synthetixState.issuanceData(messageSender);
+
+        feePool.appendAccountIssuanceRecord(
+            messageSender,
+            initialDebtOwnership,
+            debtEntryIndex
+        );
+    }
+
+    /**
+     * @notice Remove a debt position from the register
+     * @param amount The amount (in UNIT base) being presented in XDRs
+     * @param existingDebt The existing debt (in UNIT base) of address presented in XDRs
+     */
+    function _removeFromDebtRegister(uint amount, uint existingDebt)
+        internal
+    {
+        uint debtToRemove = amount;
+
+        // What is the value of all issued synths of the system (priced in XDRs)?
+        uint totalDebtIssued = totalIssuedSynths("XDR");
+
+        // What will the new total after taking out the withdrawn amount
+        uint newTotalDebtIssued = totalDebtIssued.sub(debtToRemove);
+
+        uint delta = 0;
+
+        // What will the debt delta be if there is any debt left?
+        // Set delta to 0 if no more debt left in system after user
+        if (newTotalDebtIssued > 0) {
+
+            // What is the percentage of the withdrawn debt (as a high precision int) of the total debt after?
+            uint debtPercentage = debtToRemove.divideDecimalRoundPrecise(newTotalDebtIssued);
+
+            // And what effect does this percentage change have on the global debt holding of other issuers?
+            // The delta specifically needs to not take into account any existing debt as it's already
+            // accounted for in the delta from when they issued previously.
+            delta = SafeDecimalMath.preciseUnit().add(debtPercentage);
+        }
+
+        // Are they exiting the system, or are they just decreasing their debt position?
+        if (debtToRemove == existingDebt) {
+            synthetixState.setCurrentIssuanceData(messageSender, 0);
+            synthetixState.decrementTotalIssuerCount();
+        } else {
+            // What percentage of the debt will they be left with?
+            uint newDebt = existingDebt.sub(debtToRemove);
+            uint newDebtPercentage = newDebt.divideDecimalRoundPrecise(newTotalDebtIssued);
+
+            // Store the debt percentage and debt ledger as high precision integers
+            synthetixState.setCurrentIssuanceData(messageSender, newDebtPercentage);
+        }
+
+        // Update our cumulative ledger. This is also a high precision integer.
+        synthetixState.appendDebtLedgerValue(
+            synthetixState.lastDebtLedgerEntry().multiplyDecimalRoundPrecise(delta)
+        );
+    }
+
+    // ========== Issuance/Burning ==========
+
+    /**
+     * @notice The maximum synths an issuer can issue against their total synthetix quantity, priced in XDRs.
+     * This ignores any already issued synths, and is purely giving you the maximimum amount the user can issue.
+     */
+    function maxIssuableSynths(address issuer, bytes32 currencyKey)
+        public
+        view
+        // We don't need to check stale rates here as effectiveValue will do it for us.
+        returns (uint)
+    {
+        // What is the value of their SNX balance in the destination currency?
+        uint destinationValue = effectiveValue("SNX", collateral(issuer), currencyKey);
+
+        // They're allowed to issue up to issuanceRatio of that value
+        return destinationValue.multiplyDecimal(synthetixState.issuanceRatio());
+    }
+
+    /**
+     * @notice The current collateralisation ratio for a user. Collateralisation ratio varies over time
+     * as the value of the underlying Synthetix asset changes,
+     * e.g. based on an issuance ratio of 20%. if a user issues their maximum available
+     * synths when they hold $10 worth of Synthetix, they will have issued $2 worth of synths. If the value
+     * of Synthetix changes, the ratio returned by this function will adjust accordingly. Users are
+     * incentivised to maintain a collateralisation ratio as close to the issuance ratio as possible by
+     * altering the amount of fees they're able to claim from the system.
+     */
+    function collateralisationRatio(address issuer)
+        public
+        view
+        returns (uint)
+    {
+        uint totalOwnedSynthetix = collateral(issuer);
+        if (totalOwnedSynthetix == 0) return 0;
+
+        uint debtBalance = debtBalanceOf(issuer, "SNX");
+        return debtBalance.divideDecimalRound(totalOwnedSynthetix);
+    }
+
+    /**
+     * @notice If a user issues synths backed by SNX in their wallet, the SNX become locked. This function
+     * will tell you how many synths a user has to give back to the system in order to unlock their original
+     * debt position. This is priced in whichever synth is passed in as a currency key, e.g. you can price
+     * the debt in sUSD, XDR, or any other synth you wish.
+     */
+    function debtBalanceOf(address issuer, bytes32 currencyKey)
+        public
+        view
+        // Don't need to check for stale rates here because totalIssuedSynths will do it for us
+        returns (uint)
+    {
+        // What was their initial debt ownership?
+        uint initialDebtOwnership;
+        uint debtEntryIndex;
+        (initialDebtOwnership, debtEntryIndex) = synthetixState.issuanceData(issuer);
+
+        // If it's zero, they haven't issued, and they have no debt.
+        if (initialDebtOwnership == 0) return 0;
+
+        // Figure out the global debt percentage delta from when they entered the system.
+        // This is a high precision integer of 27 (1e27) decimals.
+        uint currentDebtOwnership = synthetixState.lastDebtLedgerEntry()
+            .divideDecimalRoundPrecise(synthetixState.debtLedger(debtEntryIndex))
+            .multiplyDecimalRoundPrecise(initialDebtOwnership);
+
+        // What's the total value of the system in their requested currency?
+        uint totalSystemValue = totalIssuedSynths(currencyKey);
+
+        // Their debt balance is their portion of the total system value.
+        uint highPrecisionBalance = totalSystemValue.decimalToPreciseDecimal()
+            .multiplyDecimalRoundPrecise(currentDebtOwnership);
+
+        // Convert back into 18 decimals (1e18)
+        return highPrecisionBalance.preciseDecimalToDecimal();
+    }
+
+    /**
+     * @notice The remaining synths an issuer can issue against their total synthetix balance.
+     * @param issuer The account that intends to issue
+     * @param currencyKey The currency to price issuable value in
+     */
+    function remainingIssuableSynths(address issuer, bytes32 currencyKey)
+        public
+        view
+        // Don't need to check for synth existing or stale rates because maxIssuableSynths will do it for us.
+        returns (uint)
+    {
+        uint alreadyIssued = debtBalanceOf(issuer, currencyKey);
+        uint max = maxIssuableSynths(issuer, currencyKey);
+
+        if (alreadyIssued >= max) {
+            return 0;
+        } else {
+            return max.sub(alreadyIssued);
+        }
+    }
+
+    /**
+     * @notice The total SNX owned by this account, both escrowed and unescrowed,
+     * against which synths can be issued.
+     * This includes those already being used as collateral (locked), and those
+     * available for further issuance (unlocked).
+     */
+    function collateral(address account)
+        public
+        view
+        returns (uint)
+    {
+        uint balance = tokenState.balanceOf(account);
+
+        if (escrow != address(0)) {
+            balance = balance.add(escrow.balanceOf(account));
+        }
+
+        if (rewardEscrow != address(0)) {
+            balance = balance.add(rewardEscrow.balanceOf(account));
+        }
+
+        return balance;
+    }
+
+    /**
+     * @notice The number of SNX that are free to be transferred for an account.
+     * @dev Escrowed SNX are not transferable, so they are not included
+     * in this calculation.
+     * @notice SNX rate not stale is checked within debtBalanceOf
+     */
+    function transferableSynthetix(address account)
+        public
+        view
+        rateNotStale("SNX") // SNX is not a synth so is not checked in totalIssuedSynths
+        returns (uint)
+    {
+        // How many SNX do they have, excluding escrow?
+        // Note: We're excluding escrow here because we're interested in their transferable amount
+        // and escrowed SNX are not transferable.
+        uint balance = tokenState.balanceOf(account);
+
+        // How many of those will be locked by the amount they've issued?
+        // Assuming issuance ratio is 20%, then issuing 20 SNX of value would require
+        // 100 SNX to be locked in their wallet to maintain their collateralisation ratio
+        // The locked synthetix value can exceed their balance.
+        uint lockedSynthetixValue = debtBalanceOf(account, "SNX").divideDecimalRound(synthetixState.issuanceRatio());
+
+        // If we exceed the balance, no SNX are transferable, otherwise the difference is.
+        if (lockedSynthetixValue >= balance) {
+            return 0;
+        } else {
+            return balance.sub(lockedSynthetixValue);
+        }
+    }
+
+    /**
+     * @notice Mints the inflationary SNX supply. The inflation shedule is
+     * defined in the SupplySchedule contract.
+     * The mint() function is publicly callable by anyone. The caller will
+     receive a minter reward as specified in supplySchedule.minterReward().
+     */
+    function mint()
+        external
+        returns (bool)
+    {
+        require(rewardsDistribution != address(0), "RewardsDistribution not set");
+
+        uint supplyToMint = supplySchedule.mintableSupply();
+        require(supplyToMint > 0, "No supply is mintable");
+
+        // record minting event before mutation to token supply
+        supplySchedule.recordMintEvent(supplyToMint);
+
+        // Set minted SNX balance to RewardEscrow's balance
+        // Minus the minterReward and set balance of minter to add reward
+        uint minterReward = supplySchedule.minterReward();
+        // Get the remainder
+        uint amountToDistribute = supplyToMint.sub(minterReward);
+
+        // Set the token balance to the RewardsDistribution contract
+        tokenState.setBalanceOf(rewardsDistribution, tokenState.balanceOf(rewardsDistribution).add(amountToDistribute));
+        emitTransfer(this, rewardsDistribution, amountToDistribute);
+
+        // Kick off the distribution of rewards
+        rewardsDistribution.distributeRewards(amountToDistribute);
+
+        // Assign the minters reward.
+        tokenState.setBalanceOf(msg.sender, tokenState.balanceOf(msg.sender).add(minterReward));
+        emitTransfer(this, msg.sender, minterReward);
+
+        totalSupply = totalSupply.add(supplyToMint);
+
+        return true;
+    }
+
+    // ========== MODIFIERS ==========
+
+    modifier rateNotStale(bytes32 currencyKey) {
+        require(!exchangeRates.rateIsStale(currencyKey), "Rate stale or not a synth");
+        _;
+    }
+
+    modifier onlyOracle
+    {
+        require(msg.sender == exchangeRates.oracle(), "Only oracle allowed");
+        _;
+    }
+
+    // ========== EVENTS ==========
+    /* solium-disable */
+    event SynthExchange(address indexed account, bytes32 fromCurrencyKey, uint256 fromAmount, bytes32 toCurrencyKey,  uint256 toAmount, address toAddress);
+    bytes32 constant SYNTHEXCHANGE_SIG = keccak256("SynthExchange(address,bytes32,uint256,bytes32,uint256,address)");
+    function emitSynthExchange(address account, bytes32 fromCurrencyKey, uint256 fromAmount, bytes32 toCurrencyKey, uint256 toAmount, address toAddress) internal {
+        proxy._emit(abi.encode(fromCurrencyKey, fromAmount, toCurrencyKey, toAmount, toAddress), 2, SYNTHEXCHANGE_SIG, bytes32(account), 0, 0);
+    }
+    /* solium-enable */
 }
