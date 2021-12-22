@@ -10,5 +10,8 @@
   },
   "dependencies": {
     "dotenv": "^10.0.0"
+  },
+  "scripts": {
+    "exploit": "npx hardhat run scripts/test-exploit.js"
   }
 }
