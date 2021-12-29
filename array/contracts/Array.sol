@@ -3,7 +3,7 @@ pragma solidity ^0.5.0;
 
 
 contract Array {
-    address owner = msg.sender;
+    address public owner = msg.sender;
     bytes32[] public array;
 
     constructor () public payable {
