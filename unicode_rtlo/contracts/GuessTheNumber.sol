@@ -5,15 +5,15 @@ import "hardhat/console.sol";
 
 contract GuessTheNumber
 {
-    uint _secretNumber;
-    address payable _owner;
+    uint secretNumber;
+    address payable owner;
     event result(string);
 
-    constructor(uint secretNumber) payable public
+    constructor(uint _secretNumber) payable public
     {
-        require(secretNumber <= 10);
-        _secretNumber = secretNumber;
-        _owner = msg.sender;    
+        require(_secretNumber <= 10);
+        secretNumber = _secretNumber;
+        owner = msg.sender;    
     }
 
     function getValue() view public returns (uint)
@@ -33,7 +33,7 @@ contract GuessTheNumber
 
     function checkAndTransferPrize(uint p, uint n, address payable guesser) internal returns(bool)
     {
-        if(n == _secretNumber)
+        if(n == secretNumber)
         {
             guesser.transfer(p);
             emit result("You guessed the correct number!");
@@ -46,7 +46,7 @@ contract GuessTheNumber
 
     function kill() public
     {
-        require(msg.sender == _owner);
-        selfdestruct(_owner);
+        require(msg.sender == owner);
+        selfdestruct(owner);
     }
 }
