@@ -1,15 +1,18 @@
-# Basic Sample Hardhat Project
+### ERC20 "WaffleToken" lab
 
-This project demonstrates a basic Hardhat use case. It comes with a sample contract, a test for that contract, a sample script that deploys that contract, and an example of a task implementation, which simply lists the available accounts.
+## Install
 
-Try running some of the following tasks:
+- run `npm i`
+## Implement
 
-```shell
-npx hardhat accounts
-npx hardhat compile
-npx hardhat clean
-npx hardhat test
-npx hardhat node
-node scripts/sample-script.js
-npx hardhat help
-```
+- implement code in `./test/test-token.js`
+- refer to code in `./contracts/WaffleToken.sol`
+
+## Test
+
+- create and edit `.env` file
+- add `PRIVATE_KEY="<your key here>"` where the value is your private key
+- add `INFURA_URL="<your key here>"` where the value is the URL to your INFURA API endpoint
+- add `WAFFLETOKEN_ADDRESS="<your key here>"` where the value is the address to the deployed WaffleToken contract
+
+- run `npm run token`
