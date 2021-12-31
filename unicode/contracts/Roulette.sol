@@ -6,7 +6,7 @@ import "hardhat/console.sol";
 
 contract Roulette {
 
-    enum Color{ RED, BLACK, GREEN }
+   enum Color { RED, BLACK, GREEN }
 
    struct betStruct { 
         Color color;
